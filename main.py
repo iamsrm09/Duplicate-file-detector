@@ -1,13 +1,27 @@
 import os
 import asyncio
-import json
-from datetime import datetime
-from threading import Thread
 from flask import Flask
+from threading import Thread
+
+# --- 1. FLASK KO SABSE PEHLE START KARO (RENDER KE LIYE) ---
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return "Film4you Cleaner Live - Bot Running"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port, use_reloader=False)
+
+# Flask ko turant background me chalao
+Thread(target=run_flask, daemon=True).start()
+
+# --- 2. AB BOT KA CODE ---
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from datetime import datetime
 
-# FIX FOR RENDER PYTHON 3.14
+# Loop fix for Render
 try:
     asyncio.set_event_loop(asyncio.new_event_loop())
 except:
@@ -20,15 +34,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID"))
 OWNER_ID = int(os.environ.get("OWNER_ID"))
 
-# Flask alive
-flask_app = Flask('')
-@flask_app.route('/')
-def home():
-    return "Film4you Cleaner Live"
-def run_flask():
-    flask_app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
-Thread(target=run_flask, daemon=True).start()
-
 user = Client("user_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION)
 bot = Client("bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -37,14 +42,9 @@ deleted_global = []
 
 @bot.on_message(filters.command("start") & filters.private)
 async def start_cmd(c, m):
-    if m.from_user.id!= OWNER_ID:
-        return
+    if m.from_user.id!= OWNER_ID: return
     await m.reply_text(
-        "Film4you Professional Cleaner\n\n"
-        f"Channel: {CHANNEL_ID}\nLive & Ready\n\n"
-        "/scan - Check duplicates\n"
-        "/clean - Delete duplicates\n"
-        "/report - Last report",
+        "Film4you Cleaner Live\n\n/scan - Check\n/clean - Delete",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("SCAN NOW", callback_data="scan")],
             [InlineKeyboardButton("CLEAN NOW", callback_data="clean")]
@@ -53,55 +53,40 @@ async def start_cmd(c, m):
 
 @bot.on_callback_query()
 async def cb_handler(c, q):
-    if q.from_user.id!= OWNER_ID:
-        return
+    if q.from_user.id!= OWNER_ID: return
     await q.answer()
-    if q.data == "scan":
-        await start_cleaning(c, q.message, False)
-    else:
-        await start_cleaning(c, q.message, True)
+    await start_cleaning(c, q.message, q.data == "clean")
 
 @bot.on_message(filters.command(["scan", "clean"]) & filters.private)
 async def cmd_handler(c, m):
-    if m.from_user.id!= OWNER_ID:
-        return
-    delete_mode = "clean" in m.text
-    await start_cleaning(c, m, delete_mode)
+    if m.from_user.id!= OWNER_ID: return
+    await start_cleaning(c, m, "clean" in m.text)
 
 async def start_cleaning(c, message, delete_mode):
     global scanned_global, deleted_global
     scanned_global = 0
     deleted_global = []
-
     mode_text = "CLEAN MODE" if delete_mode else "SCAN MODE"
-    status = await c.send_message(OWNER_ID, f"{mode_text}\n\nStarting scan... 0 files")
+    status = await c.send_message(OWNER_ID, f"{mode_text}\n\nStarting scan...")
 
     seen_uid = {}
     seen_size = {}
 
     async for msg in user.get_chat_history(CHANNEL_ID):
         file = msg.video or msg.document
-        if not file:
-            continue
-
+        if not file: continue
         scanned_global += 1
-
         if scanned_global % 40 == 0:
-            try:
-                await status.edit_text(f"{mode_text}\nScanned: {scanned_global}\nFound: {len(deleted_global)}")
-            except:
-                pass
+            try: await status.edit_text(f"{mode_text}\nScanned: {scanned_global}\nFound: {len(deleted_global)}")
+            except: pass
 
         uid = file.file_unique_id
         size = file.file_size
         size_mb = size / 1024 / 1024
         duration = getattr(file, 'duration', 0)
-        cap = msg.caption or file.file_name or "No Name"
-        name = cap[:35].replace("\n", " ")
-
+        name = (msg.caption or file.file_name or "No Name")[:35].replace("\n", " ")
         is_dup = False
         reason = ""
-
         if uid in seen_uid:
             is_dup = True
             reason = "Same File ID"
@@ -113,7 +98,6 @@ async def start_cleaning(c, message, delete_mode):
             else:
                 seen_uid[uid] = msg.id
                 seen_size[key] = msg.id
-
         if is_dup:
             if delete_mode:
                 try:
@@ -130,45 +114,25 @@ async def start_cleaning(c, message, delete_mode):
             if "MB" in line:
                 mb = float(line.split("|")[2].replace("MB","").strip())
                 total_saved += mb
-        except:
-            pass
+        except: pass
 
     if not deleted_global:
-        final_report = f"CLEAN REPORT\n\nScanned: {scanned_global}\nNo Duplicate Found! Channel clean."
+        final_report = f"CLEAN REPORT\nScanned: {scanned_global}\nNo Duplicate Found!"
     else:
-        final_report = f"PROFESSIONAL REPORT\n\n"
-        final_report += f"Scanned: {scanned_global}\n"
-        if delete_mode:
-            final_report += f"Deleted: {len(deleted_global)}\n"
-        else:
-            final_report += f"Found: {len(deleted_global)}\n"
-        final_report += f"Space: {total_saved:.2f} MB ({total_saved/1024:.2f} GB)\n"
-        final_report += f"Date: {datetime.now().strftime('%d-%m-%Y %H:%M')}\n\n"
+        final_report = f"PRO REPORT\nScanned: {scanned_global}\n{'Deleted' if delete_mode else 'Found'}: {len(deleted_global)}\nSpace: {total_saved:.2f} MB\n\n"
         for line in deleted_global[:30]:
             final_report += line + "\n\n"
-        if len(deleted_global) > 30:
-            final_report += f"and {len(deleted_global)-30} more..."
 
     await status.edit_text(final_report)
-
     if deleted_global:
         with open("Full_Report.txt", "w", encoding="utf-8") as f:
             f.write("\n".join(deleted_global))
         await c.send_document(OWNER_ID, "Full_Report.txt", caption=f"Full Report - {len(deleted_global)}")
 
-@bot.on_message(filters.command("report") & filters.private)
-async def report_cmd(c, m):
-    if m.from_user.id!= OWNER_ID:
-        return
-    if os.path.exists("Full_Report.txt"):
-        await c.send_document(OWNER_ID, "Full_Report.txt")
-    else:
-        await m.reply_text("No report. Run /scan first.")
-
 async def main():
     await user.start()
     await bot.start()
-    print("Film4you Cleaner LIVE - Ready for /scan /clean")
+    print("Film4you Cleaner LIVE - Port Bind OK")
     await idle()
     await user.stop()
     await bot.stop()
