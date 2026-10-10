@@ -1,116 +1,147 @@
-import os
-import glob
-import asyncio
+import os, glob, asyncio
 from flask import Flask
 from threading import Thread
 from pyrogram import Client, filters, idle
+from pyrogram.types import ReplyKeyboardMarkup
 
-# --- 1. Auto delete old broken session files ---
+# Cleanup old sessions
 for f in glob.glob("*.session*") + glob.glob("**/*.session*", recursive=True):
-    try:
-        os.remove(f)
-        print(f"Deleted old session file: {f}")
-    except:
-        pass
+    try: os.remove(f)
+    except: pass
 
-# --- 2. Load Config from ENV ---
 API_ID = int(os.environ.get("API_ID", "34125301"))
 API_HASH = os.environ.get("API_HASH", "ca9767c009a8e421ef634b101db6d3e3")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 SESSION_STRING = os.environ.get("SESSION_STRING", "").strip()
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "0"))  # e.g., -1003424258306
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "0"))
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
+CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "") # e.g. @film4youDataBase - fallback ke liye
 
-if not SESSION_STRING or not BOT_TOKEN or CHANNEL_ID == 0:
-    print("ERROR: SESSION_STRING / BOT_TOKEN / CHANNEL_ID is missing in ENV!")
-    exit(1)
+if not SESSION_STRING or not BOT_TOKEN:
+    print("ENV MISSING"); exit(1)
 
-print(f"SESSION_STRING length: {len(SESSION_STRING)}")
-print(f"Target CHANNEL_ID: {CHANNEL_ID}")
-
-# --- 3. Clients ---
 bot = Client("film4you_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 user = Client("film4you_user", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING, in_memory=True)
 
+# Buttons
+main_keyboard = ReplyKeyboardMarkup(
+    [["🔍 Scan", "🗑 Delete Duplicates"], ["📊 Status", "▶️ Start"]],
+    resize_keyboard=True
+)
+
+# Store duplicates in memory
+last_duplicates = []
+
 @bot.on_message(filters.command("start"))
 async def start_cmd(_, m):
-    await m.reply_text("Bot is Live! Send /scan to check for duplicates.")
+    await m.reply_text(
+        "Bot is Live ✅\n\n🔍 Scan = Check duplicates\n🗑 Delete = Delete duplicates\n📊 Status = Bot status",
+        reply_markup=main_keyboard
+    )
 
-@bot.on_message(filters.command("scan"))
+@bot.on_message(filters.regex("^(▶️ Start|/start)$"))
+async def start_btn(_, m):
+    await start_cmd(_, m)
+
+@bot.on_message(filters.regex("^(📊 Status|/status)$") | filters.command("status"))
+async def status_cmd(_, m):
+    await m.reply_text(f"✅ Bot Running\nChannel: {CHANNEL_ID}\nUser Session: Active ({len(SESSION_STRING)} chars)", reply_markup=main_keyboard)
+
+async def get_target_chat():
+    # FIX FOR Peer id invalid - pehle dialogs cache karo
+    try:
+        # 1. Try with ID
+        async for dialog in user.get_dialogs():
+            if dialog.chat.id == CHANNEL_ID:
+                return dialog.chat
+    except: pass
+    
+    try:
+        return await user.get_chat(CHANNEL_ID)
+    except:
+        if CHANNEL_USERNAME:
+            return await user.get_chat(CHANNEL_USERNAME)
+        raise
+
+@bot.on_message(filters.regex("^(🔍 Scan|/scan)$") | filters.command("scan"))
 async def scan_handler(_, m):
     if OWNER_ID != 0 and m.from_user.id != OWNER_ID:
-        await m.reply_text("You are not authorized to use this command.")
         return
-
-    await m.reply_text(f"Started scanning channel {CHANNEL_ID}... This may take 1-2 minutes.")
-
+    global last_duplicates
+    last_duplicates = []
+    
+    await m.reply_text(f"Scanning channel {CHANNEL_ID}... Please wait 1-2 min.", reply_markup=main_keyboard)
     try:
-        # Fix for Peer id invalid error - force peer cache
-        try:
-            await user.get_chat(CHANNEL_ID)
-            print("Channel resolved successfully.")
-        except Exception as e:
-            print(f"get_chat warning: {e}")
+        target_chat = await get_target_chat()
+        print(f"Channel resolved: {target_chat.id}")
 
-        file_map = {}  # file_unique_id -> first message link
-        duplicates = []
-        total_files = 0
+        file_map = {}
+        dup_list = []
+        total = 0
 
-        async for msg in user.get_chat_history(CHANNEL_ID):
-            file_unique_id = None
-            file_name = None
-
-            if msg.document:
-                file_unique_id = msg.document.file_unique_id
-                file_name = msg.document.file_name
-            elif msg.video:
-                file_unique_id = msg.video.file_unique_id
-                file_name = msg.video.file_name
-            elif msg.audio:
-                file_unique_id = msg.audio.file_unique_id
-                file_name = msg.audio.file_name
-
-            if not file_unique_id:
-                continue
-
-            total_files += 1
-
-            if file_unique_id in file_map:
-                duplicates.append(f"Duplicate: {file_name} | First seen: {file_map[file_unique_id]} | Duplicate Msg ID: {msg.id}")
+        async for msg in user.get_chat_history(target_chat.id):
+            fid = None
+            if msg.document: fid = msg.document.file_unique_id
+            elif msg.video: fid = msg.video.file_unique_id
+            elif msg.audio: fid = msg.audio.file_unique_id
+            
+            if not fid: continue
+            total += 1
+            if fid in file_map:
+                dup_list.append(msg)
             else:
-                file_map[file_unique_id] = msg.id
+                file_map[fid] = msg.id
+        
+        last_duplicates = dup_list
 
-        if not duplicates:
-            await m.reply_text(f"Scan Complete. Checked {total_files} files. No duplicates found.")
+        if not dup_list:
+            await m.reply_text(f"✅ Scan Complete. Checked {total} files. No duplicates found.")
         else:
-            report = f"Scan Complete. Checked {total_files} files.\nFound {len(duplicates)} duplicates:\n\n" + "\n".join(duplicates[:20])
-            if len(duplicates) > 20:
-                report += f"\n...and {len(duplicates) - 20} more."
-            await m.reply_text(report)
+            await m.reply_text(f"Found {len(dup_list)} duplicate files out of {total}.\n\nPress 🗑 Delete Duplicates to remove them.")
 
     except Exception as e:
-        print(f"Scan Error: {e}")
-        await m.reply_text(f"Scan failed: {e}\n\nMake sure your USER account and BOT are both admin in the channel.")
+        print(f"SCAN ERROR: {e}")
+        await m.reply_text(f"❌ Scan failed: {e}\n\n1. Make sure YOUR account (+91 wala) is joined in the channel\n2. Add CHANNEL_USERNAME in ENV also\n3. Make bot admin in channel")
 
-# --- 4. Main Runner ---
+@bot.on_message(filters.regex("^(🗑 Delete Duplicates|/delete)$") | filters.command("delete"))
+async def delete_handler(_, m):
+    if OWNER_ID != 0 and m.from_user.id != OWNER_ID: return
+    global last_duplicates
+    if not last_duplicates:
+        await m.reply_text("No duplicates in memory. First press 🔍 Scan.")
+        return
+    
+    await m.reply_text(f"Deleting {len(last_duplicates)} duplicates...")
+    deleted = 0
+    try:
+        target_chat = await get_target_chat()
+        for msg in last_duplicates:
+            try:
+                await user.delete_messages(target_chat.id, msg.id)
+                deleted += 1
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                print(f"Delete fail {msg.id}: {e}")
+        
+        await m.reply_text(f"✅ Deleted {deleted}/{len(last_duplicates)} duplicate files.")
+        last_duplicates = []
+    except Exception as e:
+        await m.reply_text(f"Delete failed: {e}")
+
 async def main():
     await bot.start()
-    print("Bot Client Started")
+    print("Bot Started")
     await user.start()
-    print("User Client Started - AUTH FIXED!")
+    print("User Started")
     await idle()
     await bot.stop()
     await user.stop()
 
-# --- 5. Flask for Render ---
 app_flask = Flask(__name__)
-
 @app_flask.route('/')
-def home():
-    return "Bot is Running"
+def home(): return "Bot Running"
 
-def run_flask():
-    app_flask.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+def run_flask(): app_flask.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 if __name__ == "__main__":
     Thread(target=run_flask).start()
